@@ -119,6 +119,7 @@ def test_mlx_shelf_hit_requires_config_json(tmp_path: Path):
     target = cfg.shelf_root / "mlx" / "mlx-community" / "Qwen3-14B-4bit"
     target.mkdir(parents=True)
     (target / "config.json").write_text("{}")
+    (target / "model.safetensors").write_bytes(b"x")
 
     result = resolve_model(cfg, "mlx-community/Qwen3-14B-4bit")
 
@@ -145,6 +146,7 @@ def test_safetensors_shelf_hit(tmp_path: Path):
     target = cfg.shelf_root / "safetensors" / "Qwen" / "Qwen3-14B"
     target.mkdir(parents=True)
     (target / "config.json").write_text("{}")
+    (target / "model.safetensors").write_bytes(b"x")
 
     result = resolve_model(cfg, "Qwen/Qwen3-14B")
 
@@ -158,6 +160,7 @@ def test_format_override(tmp_path: Path):
     target = cfg.shelf_root / "safetensors" / "Qwen" / "Qwen3-14B-GGUF"
     target.mkdir(parents=True)
     (target / "config.json").write_text("{}")
+    (target / "model.safetensors").write_bytes(b"x")
 
     result = resolve_model(cfg, "Qwen/Qwen3-14B-GGUF", format="safetensors")
 
@@ -274,6 +277,7 @@ def test_mlx_lookup_hits_additional_shelf(tmp_path: Path, monkeypatch):
     target = extra / "mlx" / "mlx-community" / "Qwen3-14B-4bit"
     target.mkdir(parents=True)
     (target / "config.json").write_text("{}")
+    (target / "model.safetensors").write_bytes(b"x")
     _patch_candidates(monkeypatch, [primary, extra])
 
     cfg = Config(shelf_root=primary, allow_downloads=False)
@@ -281,3 +285,37 @@ def test_mlx_lookup_hits_additional_shelf(tmp_path: Path, monkeypatch):
 
     assert result.status == "found"
     assert result.path == target
+
+
+# --- regression: _looks_like_model_dir partial-download checks ---------
+
+
+def test_partial_dir_not_a_hit(tmp_path: Path):
+    """Directory with config.json but no weight files must NOT be a shelf hit."""
+    cfg = _config(tmp_path)
+    target = cfg.shelf_root / "mlx" / "mlx-community" / "Qwen3-14B-4bit"
+    target.mkdir(parents=True)
+    (target / "config.json").write_text("{}")
+    # No .safetensors file — this is a partial download.
+
+    result = resolve_model(cfg, "mlx-community/Qwen3-14B-4bit")
+
+    assert result.status == "missing"
+
+
+def test_sharded_partial_dir_not_a_hit(tmp_path: Path):
+    """Directory with config.json + index but missing shards must NOT be a shelf hit."""
+    cfg = _config(tmp_path)
+    target = cfg.shelf_root / "mlx" / "mlx-community" / "Qwen3-14B-4bit"
+    target.mkdir(parents=True)
+    (target / "config.json").write_text("{}")
+    (target / "model.safetensors.index.json").write_text(
+        '{"weight_map": {"layer0": "model-00001.safetensors", "layer1": "model-00002.safetensors"}}'
+    )
+    # Only one of two shards present — still a partial download.
+    (target / "model-00001.safetensors").write_bytes(b"x")
+    # model-00002.safetensors is intentionally missing.
+
+    result = resolve_model(cfg, "mlx-community/Qwen3-14B-4bit")
+
+    assert result.status == "missing"

@@ -17,6 +17,7 @@ chasing, no temp folder to clean up.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -177,8 +178,39 @@ def shelf_path_snapshot(shelf_root: Path, repo_id: str, fmt: str) -> Path:
 
 
 def _looks_like_model_dir(path: Path) -> bool:
-    """Curated shelf hit for directory formats: dir exists with a config.json inside."""
-    return path.is_dir() and (path / "config.json").is_file()
+    """Check whether a directory on the shelf contains a complete model.
+
+    A model is considered complete if:
+    - The directory exists and has a ``config.json``.
+    - For **sharded** models (``model.safetensors.index.json`` is present):
+      every shard listed in the ``weight_map`` must exist and be non-empty.
+    - For **consolidated** models (no index): at least one ``.safetensors``
+      file must exist.
+
+    Returns ``False`` on any parse error or missing file, forcing a re-download
+    rather than serving a broken model.
+    """
+    if not path.is_dir() or not (path / "config.json").is_file():
+        return False
+
+    index = path / "model.safetensors.index.json"
+    if index.is_file():
+        # Sharded model — verify every shard from weight_map is present
+        try:
+            with open(index) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return False  # corrupted or unreadable → treat as miss
+
+        shards = set(data.get("weight_map", {}).values())
+        for shard in shards:
+            shard_file = path / shard
+            if not shard_file.is_file() or shard_file.stat().st_size == 0:
+                return False
+        return True
+
+    # Consolidated model — at least one weight file on disk
+    return any(f.suffix == ".safetensors" for f in path.iterdir() if f.is_file())
 
 
 def list_shelf_candidates(config: Config) -> list[Path]:
