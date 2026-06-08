@@ -63,6 +63,13 @@ def test_import_json_skips_unbound(tmp_path, capsys, _isolate):
     assert rc == 0
 
 
+def test_import_hf_move_is_rejected(tmp_path, capsys, _isolate):
+    """--from hf --move is rejected before any scan (HF-cache move would orphan blobs)."""
+    rc = main(["import", "--from", "hf", "--move"])
+    assert rc == 2
+    assert "move" in capsys.readouterr().err.lower()
+
+
 def test_import_from_hf_dispatch(tmp_path, capsys, _isolate, monkeypatch):
     """--from hf routes through _IMPORT_SCANNERS and the candidate reaches the plan."""
     import json as _json

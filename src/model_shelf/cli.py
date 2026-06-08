@@ -293,9 +293,10 @@ def cmd_import(args: argparse.Namespace, cfg: Config) -> int:
     if bool(args.path) == bool(args.source_from):
         print("model-shelf: provide exactly one of PATH or --from", file=sys.stderr)
         return 2
-    if args.source_from == "ollama" and action == "move":
-        print("model-shelf: --move is not supported for --from ollama "
-              "(Ollama's content-addressed store would break); use --copy.",
+    if args.source_from in ("hf", "ollama") and action == "move":
+        print(f"model-shelf: --move is not supported for --from {args.source_from} "
+              f"(it would corrupt the {args.source_from} cache — it stores files "
+              "indirectly); copy is the only safe option here.",
               file=sys.stderr)
         return 2
 

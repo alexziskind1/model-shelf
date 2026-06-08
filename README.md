@@ -121,7 +121,7 @@ Runs as a **dry-run by default** — it prints the plan. Add `--apply` to execut
 | source | `--move` | notes |
 |--------|----------|-------|
 | `<dir>` | yes | repo_id inferred from `publisher/repo` nesting, else prompted |
-| `--from hf` | yes | un-mangles `models--a--b`; copy keeps the HF cache intact |
+| `--from hf` | copy-only | un-mangles `models--a--b`; move would orphan cache blobs & break the HF cache index, so copy only |
 | `--from lmstudio` | yes | auto-discovers LM Studio's model dir |
 | `--from ollama` | copy-only | moving would break Ollama's content-addressed store; `hf.co/...` pulls map to their real repo id, `library/...` to `ollama-library/<model>` |
 
