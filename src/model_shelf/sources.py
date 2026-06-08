@@ -166,3 +166,74 @@ def scan_hf_cache(
                     quant=None, size_bytes=_dir_size(snap), source_label="hf",
                 ))
     return candidates
+
+
+_OLLAMA_MODEL_MEDIA_TYPE = "application/vnd.ollama.image.model"
+
+
+def _ollama_repo_and_quant(manifest_rel_parts: tuple[str, ...]) -> tuple[str | None, str]:
+    """Map a manifest path under manifests/ to (repo_id, quant/tag).
+
+    manifests/hf.co/<user>/<repo>/<tag>             -> (user/repo, tag)
+    manifests/registry.ollama.ai/library/<m>/<tag>  -> (ollama-library/<m>, tag)
+    other registries                                -> (None, tag)  # needs binding
+    """
+    parts = manifest_rel_parts
+    if len(parts) < 2:
+        return None, ""
+    registry, *rest, tag = parts
+    if registry == "hf.co" and len(rest) >= 2:
+        return f"{rest[0]}/{rest[1]}", tag
+    if registry == "registry.ollama.ai" and len(rest) >= 2 and rest[0] == "library":
+        return f"ollama-library/{rest[1]}", tag
+    if registry == "registry.ollama.ai" and len(rest) == 1 and rest[0] != "library":
+        return f"ollama-library/{rest[0]}", tag
+    return None, tag
+
+
+def scan_ollama(
+    *,
+    home: Path | None = None,
+    models_root: Path | None = None,
+) -> list[ImportCandidate]:
+    """Scan ~/.ollama/models. Each manifest's model layer -> a gguf candidate.
+
+    Ollama blobs are content-addressed; the source_path points at the raw blob.
+    Import must copy (the CLI rejects --move for this source to keep the CAS
+    intact).
+    """
+    if models_root is None:
+        models_root = (home or Path.home()) / ".ollama" / "models"
+    manifests = models_root / "manifests"
+    blobs = models_root / "blobs"
+    if not manifests.is_dir():
+        return []
+
+    candidates: list[ImportCandidate] = []
+    for manifest in sorted(p for p in manifests.rglob("*") if p.is_file()):
+        try:
+            data = json.loads(manifest.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        layer = next(
+            (lay for lay in data.get("layers", [])
+             if lay.get("mediaType") == _OLLAMA_MODEL_MEDIA_TYPE),
+            None,
+        )
+        if layer is None:
+            continue
+        digest = str(layer.get("digest", ""))
+        if ":" not in digest:
+            continue
+        blob = blobs / f"sha256-{digest.split(':', 1)[1]}"
+        if not blob.is_file():
+            continue
+
+        rel_parts = manifest.relative_to(manifests).parts
+        repo_id, quant = _ollama_repo_and_quant(rel_parts)
+        candidates.append(ImportCandidate(
+            source_path=blob, repo_id=repo_id, format="gguf",
+            quant=quant or None, size_bytes=blob.stat().st_size,
+            source_label="ollama",
+        ))
+    return candidates

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from model_shelf.sources import scan_dir
@@ -91,3 +92,53 @@ def test_scan_hf_cache_safetensors(tmp_path: Path):
     assert cands[0].repo_id == "Qwen/Qwen3-14B"
     assert cands[0].format == "safetensors"
     assert cands[0].source_path.is_dir()
+
+
+from model_shelf.sources import scan_ollama
+
+
+def _make_ollama(models: Path, manifest_rel: str, blob_hex: str, data: bytes) -> None:
+    digest = f"sha256:{blob_hex}"
+    blob = models / "blobs" / f"sha256-{blob_hex}"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(data)
+    manifest = models / "manifests" / manifest_rel
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "layers": [
+            {"mediaType": "application/vnd.ollama.image.license", "digest": "sha256:dead", "size": 1},
+            {"mediaType": "application/vnd.ollama.image.model", "digest": digest, "size": len(data)},
+        ]
+    }))
+
+
+def test_scan_ollama_hf_pull_maps_real_repo_id(tmp_path: Path):
+    models = tmp_path / "models"
+    _make_ollama(models, "hf.co/Qwen/Qwen3-14B-GGUF/Q4_K_M", "a" * 8, b"weights")
+    cands = scan_ollama(home=tmp_path, models_root=models)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.repo_id == "Qwen/Qwen3-14B-GGUF"
+    assert c.quant == "Q4_K_M"
+    assert c.format == "gguf"
+    assert c.source_label == "ollama"
+    assert c.source_path.read_bytes() == b"weights"
+
+
+def test_scan_ollama_library_maps_synthetic_repo_id(tmp_path: Path):
+    models = tmp_path / "models"
+    _make_ollama(models, "registry.ollama.ai/library/llama3/8b", "b" * 8, b"w")
+    cands = scan_ollama(home=tmp_path, models_root=models)
+    assert len(cands) == 1
+    assert cands[0].repo_id == "ollama-library/llama3"
+    assert cands[0].quant == "8b"
+    assert cands[0].format == "gguf"
+
+
+def test_scan_ollama_library_without_model_needs_binding(tmp_path: Path):
+    """A library manifest missing the model-name segment can't be mapped → repo_id None."""
+    models = tmp_path / "models"
+    _make_ollama(models, "registry.ollama.ai/library/llama3", "c" * 8, b"w")
+    cands = scan_ollama(home=tmp_path, models_root=models)
+    assert len(cands) == 1
+    assert cands[0].repo_id is None
