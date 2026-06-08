@@ -15,6 +15,7 @@ For project-scoped overrides, use `--config <path>` or `$MODEL_SHELF_CONFIG`.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -38,6 +39,29 @@ def _read(path: Path) -> Config:
     )
 
 
+_TOML_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _toml_basic_string(value: str) -> str:
+    """Encode a string as a valid TOML basic (double-quoted) string.
+
+    Escapes backslash and double-quote, the named control escapes
+    (\\n/\\r/\\t), and any remaining control characters as \\uXXXX — the set
+    TOML 1.0 forbids unescaped in a basic string. Critical on Windows, where
+    shelf paths like ``L:\\models`` would otherwise emit an unescaped
+    backslash and make config.toml unparseable.
+    """
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    escaped = _TOML_CTRL_RE.sub(lambda m: f"\\u{ord(m.group()):04X}", escaped)
+    return f'"{escaped}"'
+
+
 def write_config(
     path: Path,
     *,
@@ -57,7 +81,7 @@ def write_config(
         "# ~/.cache/model-shelf/models. Set it explicitly to pin a location.",
     ]
     if shelf_root is not None:
-        lines.append(f'shelf_root      = "{shelf_root}"')
+        lines.append(f"shelf_root      = {_toml_basic_string(str(shelf_root))}")
     lines.append(f"allow_downloads = {'true' if allow_downloads else 'false'}")
     path.write_text("\n".join(lines) + "\n")
 
