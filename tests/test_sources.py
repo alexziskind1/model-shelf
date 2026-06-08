@@ -142,3 +142,56 @@ def test_scan_ollama_library_without_model_needs_binding(tmp_path: Path):
     cands = scan_ollama(home=tmp_path, models_root=models)
     assert len(cands) == 1
     assert cands[0].repo_id is None
+
+
+from model_shelf.sources import discover_lmstudio_root, scan_lmstudio
+
+
+def test_discover_lmstudio_root_from_default(tmp_path: Path):
+    models = tmp_path / ".lmstudio" / "models"
+    models.mkdir(parents=True)
+    assert discover_lmstudio_root(home=tmp_path) == models
+
+
+def test_discover_lmstudio_root_from_settings(tmp_path: Path):
+    home = tmp_path
+    (home / ".lmstudio").mkdir(parents=True)
+    custom = tmp_path / "external" / "lmstudio-models"
+    custom.mkdir(parents=True)
+    (home / ".lmstudio" / "settings.json").write_text(
+        json.dumps({"downloadsFolder": str(custom)})
+    )
+    assert discover_lmstudio_root(home=home) == custom
+
+
+def test_scan_lmstudio_finds_models(tmp_path: Path):
+    models = tmp_path / ".lmstudio" / "models"
+    repo = models / "lmstudio-community" / "Qwen3-14B-GGUF"
+    repo.mkdir(parents=True)
+    (repo / "Qwen3-14B-Q4_K_M.gguf").write_bytes(b"x")
+    cands = scan_lmstudio(home=tmp_path)
+    assert len(cands) == 1
+    assert cands[0].repo_id == "lmstudio-community/Qwen3-14B-GGUF"
+    assert cands[0].format == "gguf"
+    assert cands[0].source_label == "lmstudio"
+
+
+def test_discover_lmstudio_root_from_settings_with_models_subdir(tmp_path: Path):
+    """downloadsFolder containing a models/ subdir → that subdir is preferred."""
+    home = tmp_path
+    (home / ".lmstudio").mkdir(parents=True)
+    custom = tmp_path / "external" / "lmstudio-downloads"
+    models_sub = custom / "models"
+    models_sub.mkdir(parents=True)
+    (home / ".lmstudio" / "settings.json").write_text(
+        json.dumps({"downloadsFolder": str(custom)})
+    )
+    assert discover_lmstudio_root(home=home) == models_sub
+
+
+def test_discover_lmstudio_root_malformed_settings_falls_back(tmp_path: Path):
+    """Malformed settings.json must not crash — fall back to the default models dir."""
+    models = tmp_path / ".lmstudio" / "models"
+    models.mkdir(parents=True)
+    (tmp_path / ".lmstudio" / "settings.json").write_text("{ not valid json")
+    assert discover_lmstudio_root(home=tmp_path) == models

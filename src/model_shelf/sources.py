@@ -237,3 +237,45 @@ def scan_ollama(
             source_label="ollama",
         ))
     return candidates
+
+
+def discover_lmstudio_root(home: Path | None = None) -> Path | None:
+    """Find LM Studio's models directory.
+
+    Order: ~/.lmstudio/settings.json downloadsFolder (+/models if needed),
+    then the default ~/.lmstudio/models. Returns None if nothing is found.
+    (Discovery heuristic adapted from PR #3 by @bhorrock.)
+    """
+    home = home or Path.home()
+    base = home / ".lmstudio"
+
+    settings = base / "settings.json"
+    if settings.is_file():
+        try:
+            data = json.loads(settings.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        folder = data.get("downloadsFolder")
+        if folder:
+            p = Path(folder).expanduser()
+            if (p / "models").is_dir():
+                return p / "models"
+            if p.is_dir():
+                return p
+
+    default = base / "models"
+    return default if default.is_dir() else None
+
+
+def scan_lmstudio(
+    *,
+    home: Path | None = None,
+    root: Path | None = None,
+) -> list[ImportCandidate]:
+    """Scan LM Studio's model dir. Its layout is publisher/repo, so this is
+    scan_dir against the discovered root with source_label 'lmstudio'."""
+    if root is None:
+        root = discover_lmstudio_root(home)
+    if root is None:
+        return []
+    return scan_dir(root, source_label="lmstudio")
