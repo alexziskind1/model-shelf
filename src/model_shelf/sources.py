@@ -1,0 +1,99 @@
+"""Source adapters: turn an existing model location into ImportCandidates.
+
+Each adapter scans one kind of store (a plain directory, the Hugging Face
+cache, Ollama's blob store, or LM Studio's model dir) and yields
+``ImportCandidate`` records. The core (``importer.py``) does the rest.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+from model_shelf.importer import ImportCandidate
+from model_shelf.resolver import detect_format
+
+_GGUF_QUANT_RE = re.compile(r"(IQ\d[\w]*|Q\d[\w]*|BF16|F16|F32)$", re.IGNORECASE)
+
+
+def quant_from_gguf_name(filename: str) -> str | None:
+    """Extract the quant token from a GGUF filename, e.g. Qwen3-14B-Q4_K_M -> Q4_K_M."""
+    stem = filename[:-5] if filename.lower().endswith(".gguf") else filename
+    m = _GGUF_QUANT_RE.search(stem)
+    return m.group(1) if m else None
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for f in path.rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _repo_id_from_parents(model_path: Path, root: Path) -> str | None:
+    """If model_path sits at <root>/<publisher>/<repo>[/...], return 'publisher/repo'."""
+    try:
+        rel = model_path.relative_to(root)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if model_path.is_file():
+        parts = parts[:-1]  # drop the filename, keep dir nesting
+    if len(parts) == 2:
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+def _snapshot_dir_has_weights(path: Path) -> bool:
+    if not (path / "config.json").is_file():
+        return False
+    return any(
+        f.suffix in (".safetensors", ".bin", ".npz") for f in path.iterdir() if f.is_file()
+    )
+
+
+def scan_dir(root: Path, *, source_label: str = "dir") -> list[ImportCandidate]:
+    """Find GGUF files and model directories under root, deepest match wins.
+
+    A GGUF file is one candidate. A directory with config.json + weights is one
+    candidate (and its inner files are not scanned again). repo_id is inferred
+    from <publisher>/<repo> nesting, else left None (needs binding).
+    """
+    root = root.expanduser()
+    if not root.is_dir():
+        return []
+
+    candidates: list[ImportCandidate] = []
+    claimed_dirs: set[Path] = set()
+
+    # Directories first (so we can skip their inner gguf/safetensors files).
+    for d in sorted(p for p in root.rglob("*") if p.is_dir()):
+        if any(d.is_relative_to(c) for c in claimed_dirs):
+            continue
+        if _snapshot_dir_has_weights(d):
+            repo_id = _repo_id_from_parents(d, root)
+            fmt = detect_format(repo_id) if repo_id else "safetensors"
+            if fmt == "gguf":  # a dir is never gguf; fall back
+                fmt = "safetensors"
+            candidates.append(ImportCandidate(
+                source_path=d, repo_id=repo_id, format=fmt,
+                quant=None, size_bytes=_dir_size(d), source_label=source_label,
+            ))
+            claimed_dirs.add(d)
+
+    for f in sorted(p for p in root.rglob("*.gguf") if p.is_file()):
+        if any(f.is_relative_to(c) for c in claimed_dirs):
+            continue
+        repo_id = _repo_id_from_parents(f, root)
+        candidates.append(ImportCandidate(
+            source_path=f, repo_id=repo_id, format="gguf",
+            quant=quant_from_gguf_name(f.name),
+            size_bytes=f.stat().st_size, source_label=source_label,
+        ))
+
+    return candidates
