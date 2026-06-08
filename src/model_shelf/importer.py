@@ -116,3 +116,107 @@ def plan_import(
 
         ops.append(ImportOperation(c, target, "copy", "pending"))
     return ops
+
+
+def _real(path: Path) -> Path:
+    """Resolve symlinks to the real on-disk path (HF cache stores blobs as symlinks)."""
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _copy_into(src: Path, dst: Path) -> None:
+    """Copy real content of src to dst, following symlinks, for file or directory."""
+    real = _real(src)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if real.is_dir():
+        # symlinks=False → dereference any inner symlinks (HF blob links) into real files
+        shutil.copytree(real, dst, symlinks=False, dirs_exist_ok=True)
+    else:
+        shutil.copy2(real, dst)
+
+
+def _verify(dst: Path, fmt: str, expected_bytes: int | None = None) -> bool:
+    """A transferred target is valid if the shelf would treat it as a real model.
+
+    For gguf, also reject a truncated copy by comparing against the expected
+    byte count when known (copy preserves size, so a mismatch means corruption).
+    """
+    if fmt == "gguf":
+        if not (dst.is_file() and dst.stat().st_size > 0):
+            return False
+        return expected_bytes is None or dst.stat().st_size == expected_bytes
+    return _looks_like_model_dir(dst)
+
+
+def _remove_partial(target: Path) -> None:
+    """Best-effort cleanup of a half-written target after a failed transfer."""
+    try:
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def execute_import(
+    operations: list[ImportOperation],
+    *,
+    action: str = "copy",
+    dry_run: bool = True,
+) -> ImportReport:
+    """Apply pending operations. copy (default) or move; dry_run plans only.
+
+    move = copy real content -> verify -> delete the original source. The
+    source is only removed after the target verifies complete, so an
+    interrupted move never destroys the only copy. Never overwrites: a target
+    that exists at execute time (race with planning) is left untouched as a
+    conflict. A failed transfer cleans up its partial target so a re-run does
+    not mistake it for a completed import.
+
+    Note: source_path is expected to be a real file or directory (the adapters
+    never yield a directory symlink), so move deletion is unambiguous.
+    """
+    report = ImportReport(operations=operations)
+
+    for op in operations:
+        if op.status != "pending" or op.target_path is None:
+            continue
+        op.action = action
+
+        if dry_run:
+            report.bytes_imported += op.candidate.size_bytes
+            if action == "move":
+                report.bytes_reclaimable += op.candidate.size_bytes
+            continue
+
+        # Never overwrite: if the target appeared between plan and execute, skip.
+        if op.target_path.exists():
+            op.status = "conflict"
+            op.note = "target appeared between plan and execute"
+            continue
+
+        try:
+            _copy_into(op.candidate.source_path, op.target_path)
+            if not _verify(op.target_path, op.candidate.format, op.candidate.size_bytes):
+                raise RuntimeError("post-copy verification failed (incomplete target)")
+            if action == "move":
+                src = op.candidate.source_path
+                if src.is_dir() and not src.is_symlink():
+                    shutil.rmtree(src)
+                else:
+                    src.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001 — record, don't abort the batch
+            _remove_partial(op.target_path)
+            op.status = "failed"
+            op.note = (str(e).strip().splitlines() or [type(e).__name__])[-1]
+            continue
+
+        op.status = "done"
+        report.bytes_imported += op.candidate.size_bytes
+        if action == "move":
+            report.bytes_reclaimable += op.candidate.size_bytes
+
+    return report

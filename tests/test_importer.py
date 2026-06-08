@@ -3,6 +3,8 @@ from pathlib import Path
 from model_shelf.importer import (
     ImportCandidate,
     ImportOperation,
+    ImportReport,
+    execute_import,
     plan_import,
 )
 
@@ -110,3 +112,100 @@ def test_operation_to_dict_roundtrips(tmp_path: Path):
     assert d["status"] == "pending"
     assert d["target_path"].endswith("Qwen3-14B-Q4_K_M.gguf")
     assert d["size_bytes"] == 1
+
+
+def test_execute_dry_run_creates_nothing(tmp_path: Path):
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    src.write_bytes(b"abc")
+    ops = plan_import([_cand("Qwen/Qwen3-14B-GGUF", "gguf", src, quant="Q4_K_M", size=3)], shelf)
+    report = execute_import(ops, action="copy", dry_run=True)
+    assert not (shelf / "gguf").exists()
+    assert report.bytes_imported == 3  # planned
+    assert ops[0].status == "pending"
+
+
+def test_execute_copy_gguf(tmp_path: Path):
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    src.write_bytes(b"abc")
+    ops = plan_import([_cand("Qwen/Qwen3-14B-GGUF", "gguf", src, quant="Q4_K_M", size=3)], shelf)
+    report = execute_import(ops, action="copy", dry_run=False)
+    target = shelf / "gguf" / "Qwen" / "Qwen3-14B-GGUF" / "Qwen3-14B-Q4_K_M.gguf"
+    assert target.is_file() and target.read_bytes() == b"abc"
+    assert src.exists()  # copy leaves source
+    assert ops[0].status == "done"
+    assert report.bytes_imported == 3
+    assert report.bytes_reclaimable == 0
+
+
+def test_execute_move_gguf_removes_source(tmp_path: Path):
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    src.write_bytes(b"abc")
+    ops = plan_import([_cand("Qwen/Qwen3-14B-GGUF", "gguf", src, quant="Q4_K_M", size=3)], shelf)
+    report = execute_import(ops, action="move", dry_run=False)
+    target = shelf / "gguf" / "Qwen" / "Qwen3-14B-GGUF" / "Qwen3-14B-Q4_K_M.gguf"
+    assert target.is_file()
+    assert not src.exists()  # move removes source
+    assert report.bytes_reclaimable == 3
+
+
+def test_execute_copy_snapshot_dir(tmp_path: Path):
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "config.json").write_text("{}")
+    (src / "model.safetensors").write_bytes(b"weights")
+    ops = plan_import([_cand("Qwen/Qwen3-14B", "safetensors", src, size=7)], shelf)
+    execute_import(ops, action="copy", dry_run=False)
+    target = shelf / "safetensors" / "Qwen" / "Qwen3-14B"
+    assert (target / "config.json").is_file()
+    assert (target / "model.safetensors").read_bytes() == b"weights"
+    assert src.exists()
+
+
+def test_execute_idempotent_second_run(tmp_path: Path):
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    src.write_bytes(b"abc")
+    cand = _cand("Qwen/Qwen3-14B-GGUF", "gguf", src, quant="Q4_K_M", size=3)
+    execute_import(plan_import([cand], shelf), action="copy", dry_run=False)
+    ops2 = plan_import([cand], shelf)
+    assert ops2[0].status == "already_in_shelf"
+    report2 = execute_import(ops2, action="copy", dry_run=False)
+    assert report2.bytes_imported == 0
+
+
+def test_execute_resolves_symlinked_source_on_copy(tmp_path: Path):
+    """HF cache stores snapshot files as symlinks to blobs — copy must follow them."""
+    shelf = tmp_path / "shelf"
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"realdata")
+    link = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    link.symlink_to(blob)
+    ops = plan_import([_cand("Qwen/Qwen3-14B-GGUF", "gguf", link, quant="Q4_K_M", size=8)], shelf)
+    execute_import(ops, action="copy", dry_run=False)
+    target = shelf / "gguf" / "Qwen" / "Qwen3-14B-GGUF" / "Qwen3-14B-Q4_K_M.gguf"
+    assert not target.is_symlink()  # real file, not a dangling link
+    assert target.read_bytes() == b"realdata"
+
+
+def test_execute_move_keeps_source_when_verify_fails(tmp_path: Path, monkeypatch):
+    """verify-before-delete: if verification fails, the source must survive and the
+    partial target must be cleaned up."""
+    import model_shelf.importer as importer_mod
+
+    shelf = tmp_path / "shelf"
+    src = tmp_path / "Qwen3-14B-Q4_K_M.gguf"
+    src.write_bytes(b"abc")
+    ops = plan_import([_cand("Qwen/Qwen3-14B-GGUF", "gguf", src, quant="Q4_K_M", size=3)], shelf)
+
+    monkeypatch.setattr(importer_mod, "_verify", lambda *a, **k: False)
+    report = execute_import(ops, action="move", dry_run=False)
+
+    target = shelf / "gguf" / "Qwen" / "Qwen3-14B-GGUF" / "Qwen3-14B-Q4_K_M.gguf"
+    assert src.exists()              # source survived
+    assert ops[0].status == "failed"
+    assert not target.exists()       # partial target cleaned up
+    assert report.bytes_reclaimable == 0
