@@ -97,3 +97,72 @@ def scan_dir(root: Path, *, source_label: str = "dir") -> list[ImportCandidate]:
         ))
 
     return candidates
+
+
+def _unmangle_hf_repo(mangled: str) -> str | None:
+    """models--Qwen--Qwen3-14B-GGUF -> Qwen/Qwen3-14B-GGUF.
+
+    HF mangles '/' to '--'; a repo id has exactly one '/'. split('--', 1)
+    keeps any hyphens inside the repo name intact (Qwen3-14B-GGUF).
+    """
+    if not mangled.startswith("models--"):
+        return None
+    rest = mangled[len("models--"):]
+    parts = rest.split("--", 1)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def _active_snapshot(repo_dir: Path) -> Path | None:
+    """Return the snapshot dir for refs/main, else the first snapshot present."""
+    ref = repo_dir / "refs" / "main"
+    snaps = repo_dir / "snapshots"
+    if ref.is_file():
+        target = snaps / ref.read_text().strip()
+        if target.is_dir():
+            return target
+    if snaps.is_dir():
+        for s in sorted(snaps.iterdir()):
+            if s.is_dir():
+                return s
+    return None
+
+
+def scan_hf_cache(
+    *,
+    home: Path | None = None,
+    hub: Path | None = None,
+) -> list[ImportCandidate]:
+    """Scan ~/.cache/huggingface/hub. gguf -> file candidate, else dir candidate."""
+    if hub is None:
+        hub = (home or Path.home()) / ".cache" / "huggingface" / "hub"
+    if not hub.is_dir():
+        return []
+
+    candidates: list[ImportCandidate] = []
+    for repo_dir in sorted(hub.iterdir()):
+        if not repo_dir.is_dir() or not repo_dir.name.startswith("models--"):
+            continue
+        repo_id = _unmangle_hf_repo(repo_dir.name)
+        if repo_id is None:
+            continue
+        snap = _active_snapshot(repo_dir)
+        if snap is None:
+            continue
+
+        fmt = detect_format(repo_id)
+        if fmt == "gguf":
+            for f in sorted(snap.glob("*.gguf")):
+                candidates.append(ImportCandidate(
+                    source_path=f, repo_id=repo_id, format="gguf",
+                    quant=quant_from_gguf_name(f.name),
+                    size_bytes=f.resolve().stat().st_size, source_label="hf",
+                ))
+        else:
+            if _snapshot_dir_has_weights(snap):
+                candidates.append(ImportCandidate(
+                    source_path=snap, repo_id=repo_id, format=fmt,
+                    quant=None, size_bytes=_dir_size(snap), source_label="hf",
+                ))
+    return candidates
