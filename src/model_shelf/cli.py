@@ -10,6 +10,7 @@ from pathlib import Path
 
 from model_shelf.config import load_config, writable_config_path, write_config
 from model_shelf.detect import StorageCandidate, detect_storage_candidates
+from model_shelf.importer import execute_import, plan_import
 from model_shelf.resolver import (
     SUPPORTED_FORMATS,
     Config,
@@ -21,6 +22,7 @@ from model_shelf.resolver import (
     resolve_model,
 )
 from model_shelf.search import find_models
+from model_shelf.sources import scan_dir, scan_hf_cache, scan_lmstudio, scan_ollama
 
 
 def _fmt_size(n_bytes: int) -> str:
@@ -237,6 +239,91 @@ def cmd_list(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+# The "dir" source is handled via the positional PATH branch in cmd_import,
+# so it is intentionally not in this table (which maps only the --from choices).
+_IMPORT_SCANNERS = {
+    "hf": lambda: scan_hf_cache(),
+    "ollama": lambda: scan_ollama(),
+    "lmstudio": lambda: scan_lmstudio(),
+}
+
+
+def _bind_repo_ids(candidates: list) -> None:
+    """Interactively bind repo_id for candidates that lack one (TTY only)."""
+    import questionary
+
+    for c in candidates:
+        if c.repo_id is not None:
+            continue
+        answer = questionary.text(
+            f"repo_id for {c.source_path.name} (publisher/repo, blank to skip):"
+        ).ask()
+        if answer and "/" in answer:
+            c.repo_id = answer.strip()
+
+
+def _print_import_plan(report, *, dry_run: bool) -> None:
+    if not report.operations:
+        print("  (nothing to import)")
+        return
+    for op in report.operations:
+        tgt = op.target_path if op.target_path else "—"
+        print(f"  [{op.status:<16}] {op.action:<5} {op.candidate.source_label:<8} "
+              f"{op.candidate.repo_id or '?'}")
+        print(f"       {op.candidate.source_path}")
+        print(f"    -> {tgt}  ({_fmt_size(op.candidate.size_bytes)})")
+        if op.note:
+            print(f"       note: {op.note}")
+    head = "DRY-RUN — would import" if dry_run else "imported"
+    print(f"\n  {head} {_fmt_size(report.bytes_imported)}")
+    if report.bytes_reclaimable:
+        print(f"  reclaimable on source: {_fmt_size(report.bytes_reclaimable)}")
+    if dry_run:
+        print("  re-run with --apply to execute.")
+
+
+def cmd_import(args: argparse.Namespace, cfg: Config) -> int:
+    """Import existing models into the shelf (copy/move, no symlinks).
+
+    Returns 1 only if a transfer failed; idempotent/again-nothing-to-do runs return 0.
+    """
+    check_storage_available(cfg)
+    action = "move" if args.move else "copy"
+
+    if bool(args.path) == bool(args.source_from):
+        print("model-shelf: provide exactly one of PATH or --from", file=sys.stderr)
+        return 2
+    if args.source_from == "ollama" and action == "move":
+        print("model-shelf: --move is not supported for --from ollama "
+              "(Ollama's content-addressed store would break); use --copy.",
+              file=sys.stderr)
+        return 2
+
+    if args.path:
+        candidates = scan_dir(Path(args.path).expanduser())
+    else:
+        candidates = _IMPORT_SCANNERS[args.source_from]()
+
+    interactive = sys.stdin.isatty() and not args.json
+    if interactive:
+        _bind_repo_ids(candidates)
+
+    ops = plan_import(candidates, cfg.shelf_root)
+    dry_run = not args.apply
+    report = execute_import(ops, action=action, dry_run=dry_run)
+
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        _print_import_plan(report, dry_run=dry_run)
+
+    # rc contract: a hard transfer failure is the only error. Idempotent re-runs
+    # (all already_in_shelf), empty scans, conflicts and needs_binding are shown
+    # in the output but are NOT script-failing — matches cp/rsync semantics.
+    failed = any(op.status == "failed" for op in report.operations)
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="model-shelf",
@@ -296,6 +383,28 @@ def main(argv: list[str] | None = None) -> int:
         help="shelf location (writes to config); omit to use existing config",
     )
 
+    p_import = sub.add_parser(
+        "import",
+        help="import existing models into the shelf (copy/move, no symlinks)",
+    )
+    p_import.add_argument(
+        "path", nargs="?", default=None,
+        help="a directory to scan (mutually exclusive with --from)",
+    )
+    p_import.add_argument(
+        "--from", dest="source_from", default=None,
+        choices=["hf", "ollama", "lmstudio"],
+        help="import from a known source instead of a path",
+    )
+    p_import.add_argument("--copy", dest="move", action="store_false", default=False,
+                          help="copy into the shelf (default)")
+    p_import.add_argument("--move", dest="move", action="store_true",
+                          help="move into the shelf, freeing source space "
+                               "(rejected for --from ollama)")
+    p_import.add_argument("--apply", action="store_true",
+                          help="execute the plan (default is dry-run)")
+    p_import.add_argument("--json", action="store_true", help="emit JSON")
+
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     try:
@@ -307,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_init(args, cfg)
         if args.command == "find":
             return cmd_find(args, cfg)
+        if args.command == "import":
+            return cmd_import(args, cfg)
     except StorageNotAvailableError as e:
         print(f"model-shelf: {e}", file=sys.stderr)
         return 2
