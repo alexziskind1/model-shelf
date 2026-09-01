@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "model-shelf"
-version = "0.13.1"
+version = "0.14.0"
 description = "Local-first model resolver: check your own storage before downloading from Hugging Face."
 readme = "README.md"
 license = { file = "LICENSE" }

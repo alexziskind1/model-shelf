@@ -78,17 +78,23 @@ By default `init` does **not** pin a path in the config — discovery handles dr
 
 Switch shelves later by re-running `init`. Override which config file is used with `$MODEL_SHELF_CONFIG` or `--config <path>`. The user-level config (`~/.config/model-shelf/config.toml`) is the only implicit lookup — Model Shelf does not pick up a `./config.toml` from your current directory, so unrelated tools' configs can't accidentally hijack it.
 
-> If you pass a path under `/Volumes/<name>/` and `<name>` isn't currently mounted, `init` fails with a clear error instead of silently writing to the internal SSD.
+> If you pass a path under a mount root (`/Volumes/<name>/` on macOS, `/mnt/<name>/` or `/media/<name>/` on Linux) and `<name>` isn't currently mounted, `init` fails with a clear error instead of silently writing to the internal SSD.
 
 ### Multi-shelf lookup
 
 Model Shelf treats every shelf it can see locally as fair game when resolving a model. On every `resolve` it checks:
 
 1. The primary shelf (configured `shelf_root` if pinned, or auto-discovered if not).
-2. Every mounted `/Volumes/*/ModelShelf/models/` directory (any external drive with a shelf).
+2. Every mounted volume with a `ModelShelf/models/` directory — `/Volumes/*` on macOS, `/mnt/*` and `/media/*` on Linux (including `/media/<user>/*`, where most desktops auto-mount removable drives).
 3. The internal default at `~/.cache/model-shelf/models` (if it exists).
 
 First hit wins. Downloads on a miss still go to the primary. So you can plug in any drive that has a ModelShelf folder, rename your main drive, or have multiple shelves spread across drives — if the file is local *anywhere*, it's used.
+
+### Sharing one shelf across machines
+
+Because discovery keys off the `ModelShelf/models` folder convention rather than drive identity, a shelf on shared storage needs no per-machine setup. Mount the same NAS share on every box — `/Volumes/<share>` on macOS, `/mnt/<share>` on Linux — and each one auto-discovers it. The share can even mount under a different name on different machines. Leave `shelf_root` unset everywhere and there is nothing to keep in sync.
+
+> Model Shelf does no download locking, so avoid having two machines resolve the same missing model at the same moment — pull it once, then the rest hit the shelf.
 
 ### Pinned vs unpinned config
 
@@ -98,7 +104,7 @@ By default the config doesn't pin a specific path. The user-level config looks l
 allow_downloads = true
 ```
 
-That's it — no `shelf_root` line. At runtime Model Shelf auto-discovers a primary (first external `/Volumes/*/ModelShelf/models`, else internal). Swap drives, rename them, plug in a different drive entirely — nothing in the config needs to change.
+That's it — no `shelf_root` line. At runtime Model Shelf auto-discovers a primary (the first mounted volume with a `ModelShelf/models` folder, else internal). Swap drives, rename them, plug in a different drive entirely — nothing in the config needs to change.
 
 If you *want* to pin a specific path (say, you have two external drives and want downloads to land on a particular one), run `model-shelf init <path>` — that writes `shelf_root` to the config explicitly. Running `model-shelf init` without an argument never pins.
 
@@ -212,7 +218,7 @@ shelf_root = "~/.cache/model-shelf/models"
 
 ## Status
 
-v0.13 — GGUF, MLX, and safetensors via CLI + Python lib. **Publisher/repo nested layout** that mirrors the Hugging Face Hub (and matches what LM Studio expects). Config is unpinned by default: `shelf_root` is optional, auto-discovered at runtime from any mounted `/Volumes/*/ModelShelf/models` (else internal). `model-shelf init <path>` pins; `model-shelf init` without an argument does not. Multi-shelf lookup: every `resolve` checks the primary plus every mounted drive with a ModelShelf folder plus the internal default. `model-shelf find <query>` searches Hugging Face for loose natural-language queries. Mount precheck refuses to write if the configured volume isn't mounted. Roadmap: `verify` subcommand, quantized-safetensors variants (AWQ/GPTQ).
+v0.14 — GGUF, MLX, and safetensors via CLI + Python lib. **Publisher/repo nested layout** that mirrors the Hugging Face Hub (and matches what LM Studio expects). Config is unpinned by default: `shelf_root` is optional, auto-discovered at runtime from any mounted volume with a `ModelShelf/models` folder — `/Volumes/*` on macOS, `/mnt/*` and `/media/*` on Linux (else internal). `model-shelf init <path>` pins; `model-shelf init` without an argument does not. Multi-shelf lookup: every `resolve` checks the primary plus every mounted drive with a ModelShelf folder plus the internal default. `model-shelf find <query>` searches Hugging Face for loose natural-language queries. Mount precheck refuses to write if the configured volume isn't mounted. Roadmap: `verify` subcommand, quantized-safetensors variants (AWQ/GPTQ).
 
 ## License
 

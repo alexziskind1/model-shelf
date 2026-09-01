@@ -1,13 +1,16 @@
 """Detect plausible Model Shelf locations on the user's machine.
 
-Scans /Volumes/ for external drives and the user's home directory for
-an existing or default internal shelf. Returns a ranked list of candidates.
+Scans every mount root (/Volumes on macOS, /mnt and /media on Linux) for
+external drives, plus the user's home directory for an existing or default
+internal shelf. Returns a ranked list of candidates.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
+from model_shelf.mounts import iter_volumes
 
 
 @dataclass
@@ -26,30 +29,25 @@ def detect_storage_candidates(
 
     Order: external drives with existing shelves first, then external drives
     (new-shelf defaults), then the internal default.
+
+    `volumes_dir` restricts the scan to a single mount root (used by tests).
     """
-    if volumes_dir is None:
-        volumes_dir = Path("/Volumes")
     if home is None:
         home = Path.home()
 
     candidates: list[StorageCandidate] = []
 
-    if volumes_dir.is_dir():
-        for vol in sorted(volumes_dir.iterdir(), key=lambda p: p.name.lower()):
-            # Skip the Macintosh HD symlink and any other symlinked entries.
-            if vol.is_symlink():
-                continue
-            if not vol.is_dir():
-                continue
-            shelf_path = vol / "ModelShelf" / "models"
-            candidates.append(
-                StorageCandidate(
-                    path=shelf_path,
-                    label=vol.name,
-                    existing=shelf_path.is_dir(),
-                    is_external=True,
-                )
+    roots = None if volumes_dir is None else [volumes_dir]
+    for vol in iter_volumes(roots):
+        shelf_path = vol / "ModelShelf" / "models"
+        candidates.append(
+            StorageCandidate(
+                path=shelf_path,
+                label=vol.name,
+                existing=shelf_path.is_dir(),
+                is_external=True,
             )
+        )
 
     internal = home / ".cache" / "model-shelf" / "models"
     candidates.append(

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
+from model_shelf.mounts import iter_volumes, split_mount_path
+
 
 SUPPORTED_FORMATS = ("gguf", "mlx", "safetensors")
 
@@ -73,18 +75,20 @@ class ResolveResult:
 
 
 def _check_volume_available(config: Config) -> None:
-    """Raise StorageNotAvailableError if shelf_root's volume is unmounted (macOS /Volumes/)."""
+    """Raise StorageNotAvailableError if shelf_root's volume is unmounted."""
     root = config.shelf_root
-    parts = root.parts
-    if len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
-        volume = Path("/Volumes") / parts[2]
-        if not volume.exists():
-            raise StorageNotAvailableError(
-                f"shelf_root is set to {root}\n"
-                f"but the volume '{volume}' is not mounted.\n"
-                "Plug the drive in, or update your config "
-                "(~/.config/model-shelf/config.toml) to point at different storage."
-            )
+    split = split_mount_path(root)
+    if split is None:
+        return
+    mount_root, volume_name, _subpath = split
+    volume = mount_root / volume_name
+    if not volume.exists():
+        raise StorageNotAvailableError(
+            f"shelf_root is set to {root}\n"
+            f"but the volume '{volume}' is not mounted.\n"
+            "Plug the drive in or mount the share, or update your config "
+            "(~/.config/model-shelf/config.toml) to point at different storage."
+        )
 
 
 def check_storage_available(config: Config) -> None:
@@ -184,8 +188,8 @@ def _looks_like_model_dir(path: Path) -> bool:
 def list_shelf_candidates(config: Config) -> list[Path]:
     """Every plausible shelf root to search at resolve time.
 
-    Order: configured primary first (if set), then every mounted /Volumes/* drive
-    with a ModelShelf/models folder, then ~/.cache/model-shelf/models if it exists.
+    Order: configured primary first (if set), then every mounted volume with a
+    ModelShelf/models folder, then ~/.cache/model-shelf/models if it exists.
     De-duplicated by resolved path.
     """
     seen: set[Path] = set()
@@ -204,14 +208,10 @@ def list_shelf_candidates(config: Config) -> list[Path]:
     if config.shelf_root is not None:
         add(config.shelf_root)
 
-    volumes = Path("/Volumes")
-    if volumes.is_dir():
-        for vol in sorted(volumes.iterdir(), key=lambda p: p.name.lower()):
-            if vol.is_symlink() or not vol.is_dir():
-                continue
-            candidate = vol / "ModelShelf" / "models"
-            if candidate.is_dir():
-                add(candidate)
+    for vol in iter_volumes():
+        candidate = vol / "ModelShelf" / "models"
+        if candidate.is_dir():
+            add(candidate)
 
     internal = Path.home() / ".cache" / "model-shelf" / "models"
     if internal.is_dir():
@@ -227,23 +227,21 @@ def discover_primary_shelf(
 ) -> Path:
     """Pick a default primary shelf when the config doesn't pin one.
 
-    Preference: first external `/Volumes/*/ModelShelf/models` (alphabetical),
-    else the internal default `~/.cache/model-shelf/models`. The returned path
-    may not exist yet — downstream `check_storage_available` will surface that.
+    Preference: the first mounted volume with a `ModelShelf/models` folder —
+    `/Volumes/*` on macOS, `/mnt/*` and `/media/*` on Linux — else the internal
+    default `~/.cache/model-shelf/models`. The returned path may not exist yet;
+    downstream `check_storage_available` will surface that.
 
-    `volumes_dir` and `home` are overridable for testing.
+    `volumes_dir` (restrict the scan to a single root) and `home` are
+    overridable for testing.
     """
-    if volumes_dir is None:
-        volumes_dir = Path("/Volumes")
     if home is None:
         home = Path.home()
-    if volumes_dir.is_dir():
-        for vol in sorted(volumes_dir.iterdir(), key=lambda p: p.name.lower()):
-            if vol.is_symlink() or not vol.is_dir():
-                continue
-            candidate = vol / "ModelShelf" / "models"
-            if candidate.is_dir():
-                return candidate
+    roots = None if volumes_dir is None else [volumes_dir]
+    for vol in iter_volumes(roots):
+        candidate = vol / "ModelShelf" / "models"
+        if candidate.is_dir():
+            return candidate
     return home / ".cache" / "model-shelf" / "models"
 
 

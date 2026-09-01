@@ -21,4 +21,6 @@ allow_downloads = true
 # Examples of alternative backends:
 #   shelf_root = "/Volumes/MyExternal/ModelShelf/models"   # external SSD / DAS on macOS
 #   shelf_root = "/mnt/nas/ai-models"                      # NAS mount on Linux
+# Pinning is optional: a shelf at <mount>/ModelShelf/models is auto-discovered
+# under /Volumes (macOS) and /mnt or /media (Linux).
 #   shelf_root = "D:\\ModelShelf\\models"                  # Windows external drive
