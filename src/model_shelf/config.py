@@ -53,7 +53,8 @@ def write_config(
     lines = [
         "# Model Shelf config.",
         "# shelf_root is optional. If omitted, the primary is auto-discovered",
-        "# from any mounted /Volumes/*/ModelShelf/models, falling back to",
+        "# from any mounted volume with a ModelShelf/models folder - /Volumes/*",
+        "# on macOS, /mnt/* and /media/* on Linux - falling back to",
         "# ~/.cache/model-shelf/models. Set it explicitly to pin a location.",
     ]
     if shelf_root is not None:
