@@ -26,3 +26,8 @@ model-shelf = "model_shelf.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/model_shelf"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
