@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from pathlib import Path
 
 from model_shelf.config import load_config, writable_config_path, write_config
 from model_shelf.detect import StorageCandidate, detect_storage_candidates
+from model_shelf.lmstudio import link_lmstudio_model, migrate_lmstudio, scan_lmstudio
 from model_shelf.resolver import (
     SUPPORTED_FORMATS,
     Config,
@@ -21,6 +23,13 @@ from model_shelf.resolver import (
     resolve_model,
 )
 from model_shelf.search import find_models
+
+
+LMSTUDIO_WINDOWS_UNSUPPORTED = (
+    "LM Studio migrate/link are not supported on Windows yet. "
+    "Windows needs explicit junction/hardlink/symlink handling to avoid unsafe links. "
+    "Use `model-shelf lmstudio scan` to inspect models."
+)
 
 
 def _fmt_size(n_bytes: int) -> str:
@@ -237,6 +246,157 @@ def cmd_list(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _display_path(path: Path, root: Path, *, full_paths: bool) -> str:
+    if full_paths:
+        return str(path)
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _print_lmstudio_scan(result, *, full_paths: bool = False) -> None:
+    print(f"lmstudio  {result.lmstudio_root}")
+    for i, root in enumerate(result.shelf_roots):
+        label = "shelf" if i == 0 else "shelf+"
+        print(f"{label:<9} {root}")
+    print()
+    print(f"  {'status':<14} {'format':<11} {'size':>10}  model")
+    for item in result.items:
+        fmt = item.format or "unknown"
+        print(
+            f"  {item.status:<14} {fmt:<11} {_fmt_size(item.size_bytes):>10}  "
+            f"{item.model}"
+        )
+        print(
+            f"  {'':<14} {'':<11} {'':>10}  path: "
+            f"{_display_path(item.source_path, result.lmstudio_root, full_paths=full_paths)}"
+        )
+        if item.target_path:
+            shelf_root = result.shelf_roots[0] if result.shelf_roots else item.target_path.parent
+            print(
+                f"  {'':<14} {'':<11} {'':>10}  shelf: "
+                f"{_display_path(item.target_path, shelf_root, full_paths=full_paths)}"
+            )
+        if item.is_link and item.link_target:
+            print(f"  {'':<14} {'':<11} {'':>10}  link: {item.link_target}")
+        if item.reason:
+            print(f"  {'':<14} {'':<11} {'':>10}  reason: {item.reason}")
+    s = result.summary
+    print()
+    print(
+        "summary: "
+        f"{s.get('scanned', 0)} scanned, "
+        f"{s.get('in_shelf', 0)} in shelf, "
+        f"{s.get('lmstudio_only', 0)} lmstudio only, "
+        f"{s.get('duplicated', 0)} duplicated, "
+        f"{s.get('lmstudio_link', 0)} lmstudio links, "
+        f"{s.get('shelf_link', 0)} shelf links, "
+        f"{s.get('ambiguous', 0)} ambiguous, "
+        f"{s.get('unsupported', 0)} unsupported"
+    )
+
+
+def cmd_lmstudio_scan(args: argparse.Namespace, cfg: Config) -> int:
+    result = scan_lmstudio(
+        cfg,
+        lmstudio_root=Path(args.lmstudio_root).expanduser() if args.lmstudio_root else None,
+        format=args.format,
+        use_lms=args.use_lms,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_lmstudio_scan(result, full_paths=args.full_paths)
+    return 0
+
+
+def _print_lmstudio_migrate(result) -> None:
+    mode = "applied" if result.applied else "dry-run"
+    print(f"migration  {mode}")
+    print(f"lmstudio   {result.scan.lmstudio_root}")
+    print()
+    if not result.operations:
+        print("(no LM Studio-only supported models to migrate)")
+    else:
+        print(f"  {'status':<9} {'action':<30} source -> target")
+        for op in result.operations:
+            print(f"  {op.status:<9} {op.action:<30} {op.source_path} -> {op.target_path}")
+            if op.link_path:
+                print(f"  {'':<9} {'link':<30} {op.link_path} -> {op.target_path}")
+            if op.reason:
+                print(f"  {'':<9} {'reason':<30} {op.reason}")
+    print()
+    s = result.scan.summary
+    print(
+        "summary: "
+        f"{s.get('lmstudio_only', 0)} LM Studio-only supported models, "
+        f"{len(result.operations)} planned operations"
+    )
+
+
+def cmd_lmstudio_migrate(args: argparse.Namespace, cfg: Config) -> int:
+    if os.name == "nt":
+        print(f"model-shelf: {LMSTUDIO_WINDOWS_UNSUPPORTED}", file=sys.stderr)
+        return 2
+    dry_run = args.dry_run if args.model else (args.dry_run or not args.yes)
+    result = migrate_lmstudio(
+        cfg,
+        model=args.model,
+        filename=args.filename,
+        lmstudio_root=Path(args.lmstudio_root).expanduser() if args.lmstudio_root else None,
+        format=args.format,
+        use_lms=args.use_lms,
+        link=args.link,
+        dry_run=dry_run,
+        yes=args.yes or bool(args.model),
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_lmstudio_migrate(result)
+    return 0
+
+
+def _print_lmstudio_link(result) -> None:
+    mode = "applied" if result.applied else "dry-run"
+    print(f"link       {mode}")
+    print(f"lmstudio   {result.scan.lmstudio_root}")
+    if result.operation is None:
+        print()
+        print("(no link operation)")
+        return
+    op = result.operation
+    print()
+    print(f"  {'status':<9} {'action':<20} shelf -> lmstudio")
+    print(f"  {op.status:<9} {op.action:<20} {op.source_path} -> {op.target_path}")
+    if op.reason:
+        print(f"  {'':<9} {'reason':<20} {op.reason}")
+
+
+def cmd_lmstudio_link(args: argparse.Namespace, cfg: Config) -> int:
+    if os.name == "nt":
+        print(f"model-shelf: {LMSTUDIO_WINDOWS_UNSUPPORTED}", file=sys.stderr)
+        return 2
+    dry_run = args.dry_run
+    result = link_lmstudio_model(
+        cfg,
+        args.model,
+        filename=args.filename,
+        lmstudio_root=Path(args.lmstudio_root).expanduser() if args.lmstudio_root else None,
+        format=args.format,
+        use_lms=args.use_lms,
+        dry_run=dry_run,
+        yes=args.yes,
+        replace_link=args.replace_link,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_lmstudio_link(result)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="model-shelf",
@@ -296,6 +456,133 @@ def main(argv: list[str] | None = None) -> int:
         help="shelf location (writes to config); omit to use existing config",
     )
 
+    p_lmstudio = sub.add_parser(
+        "lmstudio",
+        help="scan or migrate models from an LM Studio installation",
+    )
+    lmstudio_sub = p_lmstudio.add_subparsers(dest="lmstudio_command", required=True)
+
+    p_lm_scan = lmstudio_sub.add_parser(
+        "scan",
+        help="scan LM Studio models and report Model Shelf availability",
+    )
+    p_lm_scan.add_argument(
+        "--lmstudio-root",
+        default=None,
+        help="override LM Studio models directory",
+    )
+    p_lm_scan.add_argument(
+        "--format",
+        choices=SUPPORTED_FORMATS,
+        default=None,
+        help="filter to a single format",
+    )
+    p_lm_scan.add_argument(
+        "--use-lms",
+        action="store_true",
+        help="also consult `lms ls --json` during root discovery",
+    )
+    p_lm_scan.add_argument("--json", action="store_true", help="emit JSON")
+    p_lm_scan.add_argument(
+        "--full-paths",
+        action="store_true",
+        help="show absolute paths instead of paths relative to displayed roots",
+    )
+
+    p_lm_migrate = lmstudio_sub.add_parser(
+        "migrate",
+        help=argparse.SUPPRESS if os.name == "nt" else "move or link LM Studio models into Model Shelf",
+    )
+    p_lm_migrate.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="optional single model to migrate, e.g. publisher/repo or publisher/repo/file.gguf",
+    )
+    p_lm_migrate.add_argument(
+        "--filename",
+        default=None,
+        help="GGUF filename when model is given as publisher/repo",
+    )
+    p_lm_migrate.add_argument(
+        "--lmstudio-root",
+        default=None,
+        help="override LM Studio models directory",
+    )
+    p_lm_migrate.add_argument(
+        "--format",
+        choices=SUPPORTED_FORMATS,
+        default=None,
+        help="filter to a single format",
+    )
+    p_lm_migrate.add_argument(
+        "--use-lms",
+        action="store_true",
+        help="also consult `lms ls --json` during root discovery",
+    )
+    p_lm_migrate.add_argument(
+        "--link",
+        action="store_true",
+        help="leave LM Studio paths in place and link Model Shelf to them",
+    )
+    p_lm_migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show planned operations without changing files",
+    )
+    p_lm_migrate.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply bulk changes; single-model migrate applies by default unless --dry-run is passed",
+    )
+    p_lm_migrate.add_argument("--json", action="store_true", help="emit JSON")
+
+    p_lm_link = lmstudio_sub.add_parser(
+        "link",
+        help=argparse.SUPPRESS if os.name == "nt" else "link a single Model Shelf-only model into LM Studio",
+    )
+    p_lm_link.add_argument(
+        "model",
+        help="model id to link, e.g. publisher/repo or publisher/repo/file.gguf",
+    )
+    p_lm_link.add_argument(
+        "--filename",
+        default=None,
+        help="GGUF filename when model is given as publisher/repo",
+    )
+    p_lm_link.add_argument(
+        "--lmstudio-root",
+        default=None,
+        help="override LM Studio models directory",
+    )
+    p_lm_link.add_argument(
+        "--format",
+        choices=SUPPORTED_FORMATS,
+        default=None,
+        help="filter to a single format",
+    )
+    p_lm_link.add_argument(
+        "--use-lms",
+        action="store_true",
+        help="also consult `lms ls --json` during root discovery",
+    )
+    p_lm_link.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show planned operation without changing files",
+    )
+    p_lm_link.add_argument(
+        "--yes",
+        action="store_true",
+        help="accepted for compatibility; link applies by default unless --dry-run is passed",
+    )
+    p_lm_link.add_argument(
+        "--replace-link",
+        action="store_true",
+        help="replace an existing LM Studio symlink; never replaces full files or directories",
+    )
+    p_lm_link.add_argument("--json", action="store_true", help="emit JSON")
+
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     try:
@@ -307,6 +594,13 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_init(args, cfg)
         if args.command == "find":
             return cmd_find(args, cfg)
+        if args.command == "lmstudio":
+            if args.lmstudio_command == "scan":
+                return cmd_lmstudio_scan(args, cfg)
+            if args.lmstudio_command == "migrate":
+                return cmd_lmstudio_migrate(args, cfg)
+            if args.lmstudio_command == "link":
+                return cmd_lmstudio_link(args, cfg)
     except StorageNotAvailableError as e:
         print(f"model-shelf: {e}", file=sys.stderr)
         return 2

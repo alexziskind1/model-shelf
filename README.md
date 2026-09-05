@@ -140,6 +140,18 @@ model-shelf resolve "Qwen/Qwen3-14B-GGUF" --quant Q4_K_M --json
 
 # List what's on the curated shelf (all three format subfolders).
 model-shelf list
+
+# Scan LM Studio models and show which are already on the shelf.
+model-shelf lmstudio scan
+
+# Preview moving LM Studio-only models into Model Shelf, leaving LM Studio symlinks behind.
+model-shelf lmstudio migrate
+
+# Apply the move/link-back migration.
+model-shelf lmstudio migrate --yes
+
+# Leave LM Studio files where they are and link Model Shelf to them instead.
+model-shelf lmstudio migrate --link --yes
 ```
 
 Exit codes: `0` on found/downloaded, `1` on missing.
@@ -200,6 +212,42 @@ Curated-shelf paths:
 | `Qwen/Qwen3-14B` | — | `safetensors/Qwen/Qwen3-14B/` |
 
 A directory-format shelf hit requires the directory to exist **and** contain a `config.json` — that's the minimal "this is actually a model" sanity check.
+
+## LM Studio integration
+
+Model Shelf can inspect and migrate models from an LM Studio installation:
+
+```bash
+model-shelf lmstudio scan
+model-shelf lmstudio scan --json
+model-shelf lmstudio migrate          # dry run by default
+model-shelf lmstudio migrate --yes    # apply changes
+model-shelf lmstudio migrate --link --yes
+model-shelf lmstudio migrate mlx-community/gemma-4-e4b-it-8bit
+model-shelf lmstudio migrate mlx-community/gemma-4-e4b-it-8bit --dry-run
+model-shelf lmstudio link mlx-community/gemma-4-e4b-it-8bit
+```
+
+`scan` finds the LM Studio model directory from a configured LM Studio path when discoverable, otherwise it falls back to the default LM Studio model locations (`~/.cache/lm-studio/models`, then `~/.lmstudio/models`). Pass `--lmstudio-root <path>` for explicit control, or `--use-lms` to also consult `lms ls --json` during root discovery.
+
+`migrate` only handles supported Model Shelf formats: GGUF files, MLX directories, and safetensors directories. Bulk `migrate` is a dry run unless `--yes` is passed. Single-model `migrate <model>` applies by default; pass `--dry-run` to preview. By default it moves `lmstudio_only` models into the primary shelf and leaves symlinks at the original LM Studio paths so LM Studio can keep using them. With `--link`, LM Studio paths are left untouched and Model Shelf links to those files/directories instead.
+
+`link <model>` exposes a single `in_shelf` model to LM Studio by creating an LM Studio symlink to the shelf path. Pass `--dry-run` to preview without changing files. For GGUF, pass either the full scan model (`publisher/repo/file.gguf`) or use `--filename <file.gguf>` with `publisher/repo`.
+
+Close LM Studio before applying a migration. Neither `scan` nor `migrate` downloads anything from Hugging Face.
+
+### Windows support
+
+On Windows, `model-shelf lmstudio scan` is supported, but `migrate` and `link` are intentionally hidden and return a clear unsupported message if invoked directly.
+
+The missing piece is not path discovery; it is safe link creation. macOS and Linux can use ordinary symlinks for both model files and model directories. Windows has several link types with different constraints:
+
+- **Symlinks** can point to files or directories, but usually require Developer Mode or elevated privileges.
+- **Junctions** are directory-only links. They are a good fit for MLX and safetensors model directories and can point to another local drive, including an external drive, but they depend on stable drive letters or volume paths.
+- **Hard links** are file-only links and could work for GGUF files, but only on the same NTFS volume.
+- External drives add more edge cases: drive letters can change, exFAT/FAT volumes may not support the same link behavior, and disconnected drives leave broken links.
+
+Because a wrong link strategy could make LM Studio paths confusing or fragile, Windows mutation support should be added with explicit link-type handling (`auto`, `symlink`, `junction`, `hardlink`), broken-link detection, and Windows-specific tests. Until then, Windows users can scan and inspect what would need migration, but Model Shelf will not create links or move LM Studio models there.
 
 ## Storage backends
 
