@@ -108,6 +108,29 @@ That's it — no `shelf_root` line. At runtime Model Shelf auto-discovers a prim
 
 If you *want* to pin a specific path (say, you have two external drives and want downloads to land on a particular one), run `model-shelf init <path>` — that writes `shelf_root` to the config explicitly. Running `model-shelf init` without an argument never pins.
 
+## Import existing models
+
+Already have models scattered across caches and drives? Pull them onto the shelf
+instead of re-downloading. Copy is the default; `--move` frees the source.
+**No symlinks** — an imported model is a plain file/dir the shelf owns.
+
+```bash
+model-shelf import /Volumes/OldSSD/models   # scan a directory
+model-shelf import --from hf                 # ~/.cache/huggingface/hub
+model-shelf import --from lmstudio           # LM Studio's model dir
+model-shelf import --from ollama             # ~/.ollama/models (copy only)
+```
+
+Runs as a **dry-run by default** — it prints the plan. Add `--apply` to execute,
+`--json` for agent use.
+
+| source | `--move` | notes |
+|--------|----------|-------|
+| `<dir>` | yes | repo_id inferred from `publisher/repo` nesting, else prompted |
+| `--from hf` | copy-only | un-mangles `models--a--b`; move would orphan cache blobs & break the HF cache index, so copy only |
+| `--from lmstudio` | yes | auto-discovers LM Studio's model dir |
+| `--from ollama` | copy-only | moving would break Ollama's content-addressed store; `hf.co/...` pulls map to their real repo id, `library/...` to `ollama-library/<model>` |
+
 ## CLI
 
 ```bash
