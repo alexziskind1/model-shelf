@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 from model_shelf import config as config_mod
@@ -136,3 +137,37 @@ def test_writable_config_path_respects_env(tmp_path: Path, monkeypatch):
 def test_writable_config_path_respects_arg(tmp_path: Path):
     explicit = tmp_path / "explicit.toml"
     assert writable_config_path(explicit) == explicit
+
+
+def test_write_config_windows_path_roundtrips(tmp_path: Path):
+    """A Windows-style path with backslashes must produce valid, loadable TOML."""
+    cfg_path = tmp_path / "config.toml"
+    # On POSIX, Path(r"L:\models") keeps the backslash as a literal character
+    # in its string form, giving a real backslash to escape — no Windows-only
+    # path type needed to reproduce the bug.
+    write_config(cfg_path, shelf_root=Path(r"L:\models"))
+
+    # Must NOT raise tomllib.TOMLDecodeError ("Unescaped '\' in a string").
+    with open(cfg_path, "rb") as f:
+        data = tomllib.load(f)
+
+    assert data["shelf_root"] == r"L:\models"
+    assert data["allow_downloads"] is True
+
+
+def test_write_config_path_with_quote_roundtrips(tmp_path: Path):
+    """Defensive: a path containing a double-quote stays valid TOML."""
+    cfg_path = tmp_path / "config.toml"
+    write_config(cfg_path, shelf_root=Path('/tmp/wei"rd/models'))
+    with open(cfg_path, "rb") as f:
+        data = tomllib.load(f)
+    assert data["shelf_root"] == '/tmp/wei"rd/models'
+
+
+def test_write_config_control_char_roundtrips(tmp_path: Path):
+    """A control char in the value must be escaped to valid TOML, not passed through."""
+    cfg_path = tmp_path / "config.toml"
+    write_config(cfg_path, shelf_root=Path("/tmp/a\x01b/models"))
+    with open(cfg_path, "rb") as f:
+        data = tomllib.load(f)
+    assert data["shelf_root"] == "/tmp/a\x01b/models"
