@@ -154,11 +154,24 @@ def cmd_init(args: argparse.Namespace, cfg: Config) -> int:
     config_path = writable_config_path(args.config)
     if args.path:
         # Explicit path → pin it in the config.
-        write_config(
-            config_path,
-            shelf_root=new_root,
-            allow_downloads=cfg.allow_downloads,
-        )
+        try:
+            write_config(
+                config_path,
+                shelf_root=new_root,
+                allow_downloads=cfg.allow_downloads,
+            )
+        except OSError as exc:
+            # E.g. a read-only symlink provisioned by a config manager
+            # (home-manager, chezmoi, ...) — the shelf was created, but the
+            # pin cannot be written here.
+            print(
+                f"error: could not write {config_path}: {exc}\n"
+                "       The config file looks externally managed (read-only).\n"
+                "       Pin shelf_root in the tool that manages it, or point\n"
+                "       $MODEL_SHELF_CONFIG / --config at a writable file.",
+                file=sys.stderr,
+            )
+            return 1
         print(f"model-shelf: wrote {config_path}")
         print(f"            shelf_root = {new_root}  (pinned)")
     else:

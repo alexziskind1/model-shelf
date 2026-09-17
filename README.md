@@ -214,7 +214,21 @@ shelf_root = "/mnt/nas/ai-models"
 
 # Plain internal folder
 shelf_root = "~/.cache/model-shelf/models"
+
+# Shared local model root — the same gguf/ and mlx/ subfolders other local
+# runtimes read (llama.cpp via LLAMA_CACHE, oMLX via its model_dir), so one
+# retention sweep covers every runtime's weights
+shelf_root = "~/models"
 ```
+
+### Managed (read-only) config
+
+If `~/.config/model-shelf/config.toml` is provisioned by a config manager
+(home-manager, chezmoi, ...), it may be a read-only symlink. Resolution and
+downloads work normally, but `model-shelf init <path>` cannot rewrite the pin
+and fails with a clear error. Change `shelf_root` in the manager instead, or
+point `$MODEL_SHELF_CONFIG` / `--config` at a writable file for a one-off
+override.
 
 ## Status
 

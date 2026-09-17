@@ -24,3 +24,11 @@ allow_downloads = true
 # Pinning is optional: a shelf at <mount>/ModelShelf/models is auto-discovered
 # under /Volumes (macOS) and /mnt or /media (Linux).
 #   shelf_root = "D:\\ModelShelf\\models"                  # Windows external drive
+#   shelf_root = "~/models"                                # shared local model root: the same
+#                                                          # gguf/ and mlx/ subfolders other
+#                                                          # runtimes read (llama.cpp LLAMA_CACHE,
+#                                                          # oMLX model_dir)
+#
+# If ~/.config/model-shelf/config.toml is provisioned by a config manager
+# (home-manager, chezmoi, ...) it may be a read-only symlink. `model-shelf
+# init <path>` cannot rewrite it then — pin shelf_root in the manager instead.
